@@ -90,3 +90,9 @@ If then defined both of these in terms of O~A~ and O~B~. We get:
 }
 ```
 This can become more or less generic, truly it is elastic based on use case. This expansion on the idea of SPO is where RDF (reasource description framework) comes from. And in essence what we just built in the most basic sense is an RDF.
+
+Now attached I have created a basic programmatic implementation of this idea, or atleast a basic case derivation of such. That demonstration can be found in `__main__.py`. What it stipulates is that you can create a symbolic link between two entities which you know have a certain type of generic relationship between each other. In the case demonstrated, we had a land mark which had some field "country" and which we knew if we had such a field in data it might link back to a SOP description which says X - BELONGS_TO &#8594; Country based a on common binding hint:
+```json
+{"name": "name of country", "type": "Country"}
+```
+So in an algorithmic way we say, if a some object has some field 'country', then search for an object of type 'Country', where the field 'x\.name' == the field 'y.country'.
