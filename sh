@@ -48,7 +48,7 @@ trigger_one() {
 }
 
 main() {
-  rows="$(lookup_rows "${arg_group}" "${arg_project}")"
+  rows="$(lookup_rows "${arg_group:-}" "${arg_project:-}")"
   [ -n "$rows" ] || { echo "No matching projects. Check --group/--project and mapping." >&2; exit 3; }
 
   echo "$rows" | while IFS=, read -r grp proj pid; do
