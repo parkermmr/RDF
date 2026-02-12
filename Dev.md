@@ -1,189 +1,135 @@
-Short answer: Docker Compose can’t create real VMs, but you can create a cluster of containerized “VM-like” nodes that each run an SSH server and have stable, assigned IP addresses on a custom Docker network. From your local machine, you SSH directly to those IPs.
+config/opensearch-security/config.yml:
+---
+_meta:
+  type: "config"
+  config_version: 2
+
+config:
+  dynamic:
+    # HTTP basic authentication
+    http:
+      anonymous_auth_enabled: false
+      xff:
+        enabled: false
+        internalProxies: '192\.168\.0\.10|192\.168\.0\.11'
+    
+    authc:
+      # Basic authentication domain
+      basic_internal_auth_domain:
+        description: "Authenticate via HTTP Basic against internal users database"
+        http_enabled: true
+        transport_enabled: true
+        order: 0
+        http_authenticator:
+          type: basic
+          challenge: true
+        authentication_backend:
+          type: internal
+      
+      # OpenID Connect with GitLab
+      openid_auth_domain:
+        description: "Authenticate via OpenID Connect with GitLab"
+        http_enabled: true
+        transport_enabled: false
+        order: 1
+        http_authenticator:
+          type: openid
+          challenge: false
+          config:
+            subject_key: preferred_username
+            roles_key: groups
+            openid_connect_url: https://gitlab.example.com/.well-known/openid-configuration
+            # Or specify endpoints manually:
+            # openid_connect_idp:
+            #   enable_ssl: true
+            #   verify_hostnames: true
+            #   pemtrustedcas_filepath: /path/to/gitlab-ca.pem
+        authentication_backend:
+          type: noop
+
+    authz:
+      # Roles mapping from GitLab groups
+      roles_from_myldap:
+        description: "Authorize via LDAP or another method"
+        http_enabled: false
+        authorization_backend:
+          type: noop
+
+# Role-based access control mappings
+---
+_meta:
+  type: "rolesmapping"
+  config_version: 2
+
+# Map internal users to roles
+all_access:
+  reserved: false
+  backend_roles:
+  - "admin"
+  description: "Maps admin to all_access"
+
+# Map GitLab groups to OpenSearch roles
+kibana_user:
+  reserved: false
+  backend_roles:
+  - "gitlab-developers"
+  - "gitlab-viewers"
+  description: "Maps GitLab groups to kibana_user role"
+
+readall:
+  reserved: false
+  backend_roles:
+  - "gitlab-readonly"
+  description: "Maps GitLab readonly group to readall role"
+
+# Server settings
+server.port: 5601
+server.host: "0.0.0.0"
+server.name: "opensearch-dashboards"
+
+# OpenSearch connection
+opensearch.hosts: ["https://localhost:9200"]
+opensearch.ssl.verificationMode: certificate
+opensearch.username: "kibanaserver"
+opensearch.password: "kibanaserver"
+opensearch.requestHeadersAllowlist: ["securitytenant", "Authorization"]
+
+# SSL/TLS settings
+opensearch.ssl.certificateAuthorities: ["/path/to/root-ca.pem"]
+server.ssl.enabled: true
+server.ssl.certificate: /path/to/dashboards.pem
+server.ssl.key: /path/to/dashboards-key.pem
+
+# Security plugin settings
+opensearch_security.multitenancy.enabled: true
+opensearch_security.multitenancy.tenants.preferred: ["Private", "Global"]
+opensearch_security.readonly_mode.roles: ["kibana_read_only"]
+
+# Cookie security
+opensearch_security.cookie.secure: true
+opensearch_security.cookie.ttl: 3600000
+opensearch_security.session.ttl: 3600000
+opensearch_security.session.keepalive: true
+
+# OpenID Connect configuration for GitLab
+opensearch_security.auth.type: ["openid", "basicauth"]
+opensearch_security.auth.multiple_auth_enabled: true
+
+# OpenID Connect settings
+opensearch_security.openid.connect_url: "https://gitlab.example.com/.well-known/openid-configuration"
+opensearch_security.openid.client_id: "your-gitlab-application-id"
+opensearch_security.openid.client_secret: "your-gitlab-application-secret"
+opensearch_security.openid.base_redirect_url: "https://dashboards.example.com"
+opensearch_security.openid.scope: "openid profile email groups"
+opensearch_security.openid.header: "Authorization"
+
+# Optional: GitLab-specific settings
+opensearch_security.openid.logout_url: "https://gitlab.example.com/users/sign_out"
+opensearch_security.openid.verify_hostnames: true
+opensearch_security.openid.refresh_tokens: true
+
+# Basic auth settings (fallback)
+opensearch_security.basicauth.enabled: true
+opensearch_security.basicauth.login.title: "Please login to OpenSearch Dashboards"
+opensearch_security.basicauth.login.subtitle: "Use your internal credentials or login with GitLab"
 
-Below is the clean, correct way to do it, plus the limits you should be aware of.
-
-⸻
-
-Architecture overview (important mental model)
-	•	Docker containers ≠ VMs
-	•	Each “node” is a Linux container running:
-	•	OpenSSH server
-	•	Its own filesystem
-	•	A fixed private IP on a Docker bridge network
-	•	Your host machine can route to that network
-	•	SSH works exactly like a VM cluster
-
-This is perfect for:
-	•	Distributed systems testing
-	•	Cluster orchestration experiments
-	•	Networking simulations
-	•	CI / dev environments
-
-Not good for:
-	•	Kernel testing
-	•	Systemd-heavy OS behavior
-	•	Nested virtualization
-
-⸻
-
-Step 1: Project structure
-
-cluster/
-├── docker-compose.yml
-├── Dockerfile
-└── authorized_keys
-
-
-⸻
-
-Step 2: SSH-enabled node image
-
-Dockerfile
-
-FROM ubuntu:22.04
-
-RUN apt-get update && \
-    apt-get install -y openssh-server iproute2 && \
-    mkdir /var/run/sshd
-
-RUN useradd -m cluster && \
-    mkdir /home/cluster/.ssh && \
-    chmod 700 /home/cluster/.ssh
-
-COPY authorized_keys /home/cluster/.ssh/authorized_keys
-RUN chmod 600 /home/cluster/.ssh/authorized_keys && \
-    chown -R cluster:cluster /home/cluster/.ssh
-
-RUN echo "cluster ALL=(ALL) NOPASSWD:ALL" >> /etc/sudoers
-
-EXPOSE 22
-
-CMD ["/usr/sbin/sshd", "-D"]
-
-
-⸻
-
-Step 3: SSH keys
-
-On your host machine:
-
-ssh-keygen -t ed25519 -f cluster_key
-
-Then copy the public key:
-
-cp cluster_key.pub authorized_keys
-
-
-⸻
-
-Step 4: Docker Compose with static IPs
-
-docker-compose.yml
-
-version: "3.9"
-
-networks:
-  cluster_net:
-    driver: bridge
-    ipam:
-      config:
-        - subnet: 172.30.0.0/24
-
-services:
-  node1:
-    build: .
-    container_name: node1
-    networks:
-      cluster_net:
-        ipv4_address: 172.30.0.11
-
-  node2:
-    build: .
-    container_name: node2
-    networks:
-      cluster_net:
-        ipv4_address: 172.30.0.12
-
-  node3:
-    build: .
-    container_name: node3
-    networks:
-      cluster_net:
-        ipv4_address: 172.30.0.13
-
-
-⸻
-
-Step 5: Start the cluster
-
-docker compose up -d --build
-
-Verify:
-
-docker ps
-docker network inspect cluster_cluster_net
-
-
-⸻
-
-Step 6: SSH from your local machine
-
-ssh -i cluster_key cluster@172.30.0.11
-ssh -i cluster_key cluster@172.30.0.12
-ssh -i cluster_key cluster@172.30.0.13
-
-Each container behaves like its own node.
-
-⸻
-
-Step 7: Inter-node SSH (optional)
-
-If you want nodes to SSH into each other:
-
-docker exec -it node1 bash
-ssh cluster@172.30.0.12
-
-Works immediately since they’re on the same subnet.
-
-⸻
-
-Common pitfalls (read this)
-
-❌ “Why can’t I ping from host?”
-
-Docker bridge networks are private. SSH works, ICMP may not depending on host OS.
-
-❌ “I want public IPs”
-
-Docker Compose does not assign public IPs. For that you need:
-	•	macvlan networking or
-	•	real VMs (KVM, Proxmox, cloud)
-
-❌ “This doesn’t feel like a real VM”
-
-Correct. If you need:
-	•	systemd
-	•	kernel modules
-	•	full init systems
-
-Use Vagrant + libvirt, Proxmox, or Multipass instead.
-
-⸻
-
-When this setup is exactly the right choice
-	•	Distributed algorithms
-	•	Raft / gossip / leader election
-	•	Kubernetes internals testing
-	•	Network partitions
-	•	CI cluster simulations
-	•	Teaching systems concepts
-
-⸻
-
-If you want, I can also:
-	•	Convert this to macvlan so containers appear as LAN machines
-	•	Show a Vagrant / libvirt version with real VMs
-	•	Add Ansible provisioning
-	•	Turn this into a Kubernetes-in-Docker lab
-
-Just tell me what direction you’re heading.
